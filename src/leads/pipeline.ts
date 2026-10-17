@@ -141,6 +141,19 @@ function toPromptInput(
 }
 
 /**
+ * Prisma's unique-constraint violation (`PrismaClientKnownRequestError`).
+ * Duck-typed on purpose: the generated client is an implementation detail the
+ * pipeline does not otherwise import.
+ */
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === "P2002"
+  );
+}
+
+/**
  * Ingests one candidate. Never throws for analysis problems: a failed AI call
  * leaves a REVIEWABLE lead behind instead of losing the discovery (§36).
  */
@@ -193,18 +206,55 @@ export async function ingestLead(input: IngestInput, now: Date = new Date()): Pr
     };
   }
 
-  const lead = await prisma.lead.create({
-    data: {
-      sourceId: source.id,
-      sourceExternalId: input.sourceExternalId ?? null,
-      sourceUrl: input.sourceUrl ?? null,
-      sourceAuthor: input.sourceAuthor ?? null,
-      sourceCreatedAt: input.sourceCreatedAt ?? null,
-      title: input.title ?? null,
-      originalContent: content,
-      contentHash: hash,
-    },
-  });
+  let lead: { id: string };
+  try {
+    lead = await prisma.lead.create({
+      data: {
+        sourceId: source.id,
+        sourceExternalId: input.sourceExternalId ?? null,
+        sourceUrl: input.sourceUrl ?? null,
+        sourceAuthor: input.sourceAuthor ?? null,
+        sourceCreatedAt: input.sourceCreatedAt ?? null,
+        title: input.title ?? null,
+        originalContent: content,
+        contentHash: hash,
+      },
+    });
+  } catch (error) {
+    // Lost the insert race on @@unique([sourceId, sourceExternalId]): two runs
+    // found the same external post at the same moment and the other one won.
+    // Ingestion has to be idempotent (§6) — the second arrival attaches to the
+    // first record instead of crashing the scan with a constraint error.
+    if (!isUniqueViolation(error) || !input.sourceExternalId) throw error;
+
+    const winner = await prisma.lead.findFirst({
+      where: { sourceId: source.id, sourceExternalId: input.sourceExternalId },
+      select: { id: true },
+    });
+    if (!winner) throw error;
+
+    await prisma.leadEvent.create({
+      data: {
+        leadId: winner.id,
+        type: EventType.DEDUPLICATED,
+        message: `Duplicate candidate ignored (${describeDedupeReason({ code: "sameSourceItem" })})`,
+        metadata: {
+          reason: "sameSourceItem",
+          sourceKind: source.kind,
+          excerpt: excerpt(content),
+        },
+      },
+    });
+    logger.info("duplicate lead ignored (insert race won by another run)", {
+      leadId: winner.id,
+    });
+    return {
+      outcome: "duplicate",
+      leadId: winner.id,
+      reason: { code: "sameSourceItem" },
+      similarity: 1,
+    };
+  }
 
   await prisma.leadEvent.create({
     data: {
