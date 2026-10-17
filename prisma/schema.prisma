@@ -1,0 +1,343 @@
+// Personal AI Lead Hunter — database schema.
+// Naming convention: camelCase in code, snake_case in the database (per README §12/§29).
+// Prisma 7: the datasource URL lives in prisma7.config.ts, not here.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// Where a lead came from. One row per configured adapter instance, so a single
+/// source kind (e.g. Reddit) can be scanned for several sets of queries.
+model Source {
+  id         String     @id @default(cuid())
+  /// Adapter slug: "reddit" | "telegram" | "web" | "manual" (see src/sources).
+  adapter    String
+  kind       SourceKind
+  name       String
+  /// Adapter-specific settings (subreddit, channel handle, ...). Never secrets.
+  config     Json       @default("{}")
+  enabled    Boolean    @default(true)
+  lastScanAt DateTime?  @map("last_scan_at")
+  /// Free-form adapter health snapshot written by healthCheck().
+  health     Json?
+  createdAt  DateTime   @default(now()) @map("created_at")
+  updatedAt  DateTime   @updatedAt @map("updated_at")
+
+  leads         Lead[]
+  searchQueries SearchQuery[]
+
+  @@unique([adapter, name])
+  @@index([kind])
+  @@map("sources")
+}
+
+/// A stored search prompt used by source adapters (README §30).
+model SearchQuery {
+  id         String   @id @default(cuid())
+  sourceId   String?  @map("source_id")
+  query      String
+  enabled    Boolean  @default(true)
+  /// Optional AI-expanded variants (README §31), kept aside from the base query.
+  variants   String[] @default([])
+  lastRunAt  DateTime? @map("last_run_at")
+  notes      String?
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  source Source? @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@index([enabled])
+  @@map("search_queries")
+}
+
+/// A candidate opportunity discovered on a source (README §12).
+model Lead {
+  id               String @id @default(cuid())
+  sourceId         String @map("source_id")
+  /// Stable id assigned by the source platform (Reddit fullname, Telegram message id...).
+  sourceExternalId String? @map("source_external_id")
+  sourceUrl        String? @map("source_url")
+  sourceAuthor     String? @map("source_author")
+  sourceCreatedAt  DateTime? @map("source_created_at")
+
+  title           String?
+  originalContent String  @map("original_content")
+
+  category           LeadCategory @default(OTHER)
+  projectDescription String?      @map("project_description")
+
+  intentScore Int         @map("intent_score") @default(0)
+  leadScore   Int         @map("lead_score") @default(0)
+  temperature Temperature @default(COLD)
+
+  budgetMin      Int?    @map("budget_min")
+  budgetMax      Int?    @map("budget_max")
+  budgetCurrency String? @map("budget_currency")
+
+  urgency      Urgency @default(UNKNOWN)
+  location     String?
+  businessType String? @map("business_type")
+
+  requirements String[] @default([])
+  painPoints   String[] @default([]) @map("pain_points")
+
+  /// Raw structured output from the AI provider, kept verbatim for auditing.
+  aiAnalysis    Json?
+  aiModel       String?    @map("ai_model")
+  aiProcessedAt DateTime?  @map("ai_processed_at")
+  analysisStatus AnalysisStatus @default(PENDING) @map("analysis_status")
+
+  /// Deterministic fingerprint of the normalized content (README §14).
+  contentHash String @map("content_hash")
+  /// Set when this lead was merged into an earlier one.
+  duplicateOfId String? @map("duplicate_of_id")
+  /// Score/reason trail so a human can see why a score was assigned.
+  scoreBreakdown Json? @map("score_breakdown")
+
+  status LeadStatus @default(NEW)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  source      Source        @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  duplicateOf Lead?         @relation("LeadDuplicates", fields: [duplicateOfId], references: [id], onDelete: SetNull)
+  duplicates  Lead[]        @relation("LeadDuplicates")
+  analyses    AIAnalysis[]
+  events      LeadEvent[]
+  outreach    Outreach[]
+  followUps   FollowUp[]
+  notifications Notification[]
+
+  @@unique([sourceId, sourceExternalId])
+  @@index([contentHash])
+  @@index([status])
+  @@index([temperature])
+  @@index([leadScore])
+  @@index([category])
+  @@index([createdAt])
+  @@map("leads")
+}
+
+/// One AI provider call over one lead. Keeps token/cache accounting so cost and
+/// cache-hit rate are observable (README §33, claude-api skill prompt caching).
+model AIAnalysis {
+  id          String  @id @default(cuid())
+  leadId      String  @map("lead_id")
+  provider    String
+  model       String
+  /// Version tag of the prompt template that produced this result.
+  promptVersion String @map("prompt_version")
+  stage       AnalysisStage @default(FULL) @map("stage")
+
+  raw     Json?
+  parsed  Json?
+  usage   Json?
+  status  AnalysisStatus @default(PENDING)
+  error   String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId])
+  @@index([createdAt])
+  @@map("ai_analyses")
+}
+
+/// Append-only activity trail rendered on the lead detail page (README §20).
+model LeadEvent {
+  id        String    @id @default(cuid())
+  leadId    String    @map("lead_id")
+  type      EventType
+  message   String
+  metadata  Json?
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId, createdAt])
+  @@map("lead_events")
+}
+
+/// A drafted or sent message. Nothing is ever sent automatically (README §17).
+model Outreach {
+  id        String           @id @default(cuid())
+  leadId    String           @map("lead_id")
+  channel   OutreachChannel  @default(OTHER)
+  body      String
+  status    OutreachStatus   @default(DRAFT)
+  /// Model that drafted it, or "manual" when the owner wrote it.
+  model     String?
+  sentAt    DateTime?        @map("sent_at")
+  createdAt DateTime         @default(now()) @map("created_at")
+  updatedAt DateTime         @updatedAt @map("updated_at")
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId])
+  @@index([status])
+  @@map("outreach")
+}
+
+/// Reminder to chase a contacted lead (README §18). Human approval required.
+model FollowUp {
+  id        String    @id @default(cuid())
+  leadId    String    @map("lead_id")
+  dueAt     DateTime  @map("due_at")
+  body      String?
+  done      Boolean   @default(false)
+  sentAt    DateTime? @map("sent_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([dueAt, done])
+  @@map("follow_ups")
+}
+
+/// Single-owner configuration used when drafting responses (README §16).
+model DeveloperProfile {
+  id            String   @id @default("owner")
+  name          String   @default("Developer")
+  services      String[] @default([])
+  experience    String?
+  location      String?
+  languages     String[] @default([])
+  minimumBudget Int?     @map("minimum_budget")
+  /// Portfolio entries: { title, url, description }.
+  portfolio     Json     @default("[]")
+  /// Voice/tone hints woven into the response prompt.
+  tone          String?
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@map("developer_profiles")
+}
+
+/// Outbound notification for the owner (README §24). The bot talks to the owner, not to leads.
+model Notification {
+  id        String    @id @default(cuid())
+  leadId    String?   @map("lead_id")
+  channel   String
+  title     String
+  body      String
+  payload   Json?
+  sentAt    DateTime? @map("sent_at")
+  readAt    DateTime? @map("read_at")
+  error     String?
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  lead Lead? @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([readAt])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+enum SourceKind {
+  REDDIT
+  TELEGRAM
+  WEB
+  X
+  FORUM
+  JOB_BOARD
+  MANUAL
+  OTHER
+}
+
+enum LeadCategory {
+  WEBSITE
+  WEB_APP
+  MOBILE_APP
+  WORDPRESS
+  WOOCOMMERCE
+  SHOPIFY
+  TELEGRAM_BOT
+  DISCORD_BOT
+  CRM
+  AUTOMATION
+  AI
+  API_INTEGRATION
+  SEO
+  PERFORMANCE
+  BUG_FIX
+  REDESIGN
+  E_COMMERCE
+  LANDING_PAGE
+  CUSTOM_SOFTWARE
+  OTHER
+}
+
+enum Temperature {
+  HOT
+  WARM
+  COLD
+}
+
+enum Urgency {
+  UNKNOWN
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum LeadStatus {
+  NEW
+  REVIEWED
+  CONTACTED
+  REPLIED
+  QUALIFIED
+  NEGOTIATION
+  WON
+  LOST
+  REJECTED
+  ARCHIVED
+}
+
+enum AnalysisStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  SKIPPED
+}
+
+enum AnalysisStage {
+  /// Cheap first-stage screen (README §32/§33 layer 1).
+  SCREEN
+  /// Full structured analysis.
+  FULL
+  /// Response drafting.
+  RESPONSE
+}
+
+enum EventType {
+  DISCOVERED
+  DEDUPLICATED
+  ANALYZED
+  SCORED
+  REVIEWED
+  CONTACTED
+  REPLIED
+  STATUS_CHANGED
+  FOLLOWUP_SCHEDULED
+  NOTE
+}
+
+enum OutreachChannel {
+  REDDIT
+  TELEGRAM
+  EMAIL
+  WEB_FORM
+  OTHER
+}
+
+enum OutreachStatus {
+  DRAFT
+  APPROVED
+  SENT
+  DISCARDED
+}

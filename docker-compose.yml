@@ -1,0 +1,39 @@
+# Optional: run Postgres and Redis in containers instead of Homebrew.
+#   docker compose up -d
+# Then point DATABASE_URL / REDIS_URL at these ports (see .env.example).
+#
+# Port 5433 is used because a Homebrew Postgres commonly owns 5432.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lead-hunter-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lead_hunter
+      POSTGRES_PASSWORD: lead_hunter_dev_pw
+      POSTGRES_DB: lead_hunter_dev
+    ports:
+      - "5433:5432"
+    volumes:
+      - lead-hunter-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lead_hunter -d lead_hunter_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    container_name: lead-hunter-redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  lead-hunter-pgdata:
