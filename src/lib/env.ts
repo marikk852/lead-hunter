@@ -93,6 +93,16 @@ export function hasAnthropicKey(): boolean {
   return anthropicApiKey() !== null;
 }
 
+/**
+ * Strict Anthropic-key presence, *without* the `AI_API_KEY` fallback alias.
+ * Provider selection may treat either key as sufficient — but the Settings
+ * form must say "not set" when the owner never actually typed an Anthropic key,
+ * or the placeholder would claim a saved value that does not exist.
+ */
+export function hasOwnAnthropicKey(): boolean {
+  return nonEmpty(process.env.ANTHROPIC_API_KEY) !== null;
+}
+
 /** Key for the OpenAI-compatible provider — the free tier path. */
 export function compatApiKey(): string | null {
   return nonEmpty(process.env.AI_API_KEY);

@@ -1,6 +1,7 @@
 import {
   addSearchQueryAction,
   deleteSearchQueryAction,
+  saveAiKeysAction,
   saveProfileAction,
   toggleSearchQueryAction,
 } from "@/app/(app)/settings/actions";
@@ -10,6 +11,7 @@ import { callsUsedToday, describeAIProvider } from "@/src/ai";
 import { SourceKind } from "@/src/generated/prisma/enums";
 import { errorText, getI18n, template } from "@/src/i18n";
 import { prisma } from "@/src/lib/db";
+import { hasCompatKey, hasOwnAnthropicKey } from "@/src/lib/env";
 import { DEFAULT_PROFILE, getOwnerProfile, isProfileUnconfigured } from "@/src/profile";
 
 const SUGGESTED_QUERIES = [
@@ -38,6 +40,9 @@ export default async function SettingsPage({
   // claim "claude-opus-4-7" while the rules were actually scoring the leads.
   const provider = describeAIProvider();
   const dailyLimit = process.env.AI_DAILY_CALL_LIMIT ?? 250;
+  // Only *whether* a key exists is rendered — never the stored value itself.
+  const compatKeySet = hasCompatKey();
+  const anthropicKeySet = hasOwnAnthropicKey();
   const error = errorText(t, typeof params.error === "string" ? params.error : null);
 
   return (
@@ -202,6 +207,60 @@ export default async function SettingsPage({
               })}{" "}
               {provider.keyed ? null : t.settings.providerSetup}
             </p>
+
+            <form
+              action={saveAiKeysAction}
+              className="mt-4 space-y-3 border-t border-ink-800 pt-4"
+            >
+              <p className="label">{t.settings.apiKeys}</p>
+
+              <div>
+                <label htmlFor="aiApiKey" className="label block">
+                  {t.settings.compatKeyLabel}
+                </label>
+                <input
+                  id="aiApiKey"
+                  name="aiApiKey"
+                  type="password"
+                  autoComplete="new-password"
+                  placeholder={compatKeySet ? t.settings.keySet : t.settings.keyNotSet}
+                  className="mt-1 w-full border border-ink-700 bg-ink-950 px-2.5 py-1.5 text-sm text-ink-50 placeholder:text-ink-600"
+                />
+                <label className="mt-1 flex items-center gap-2 text-xs text-ink-400">
+                  <input type="checkbox" name="clearAiApiKey" className="size-3 accent-hot" />
+                  {t.settings.clearKey}
+                </label>
+              </div>
+
+              <div>
+                <label htmlFor="anthropicApiKey" className="label block">
+                  {t.settings.anthropicKeyLabel}
+                </label>
+                <input
+                  id="anthropicApiKey"
+                  name="anthropicApiKey"
+                  type="password"
+                  autoComplete="new-password"
+                  placeholder={anthropicKeySet ? t.settings.keySet : t.settings.keyNotSet}
+                  className="mt-1 w-full border border-ink-700 bg-ink-950 px-2.5 py-1.5 text-sm text-ink-50 placeholder:text-ink-600"
+                />
+                <label className="mt-1 flex items-center gap-2 text-xs text-ink-400">
+                  <input
+                    type="checkbox"
+                    name="clearAnthropicApiKey"
+                    className="size-3 accent-hot"
+                  />
+                  {t.settings.clearKey}
+                </label>
+              </div>
+
+              <SubmitButton pendingLabel={t.common.saving}>
+                {t.settings.saveKeys}
+              </SubmitButton>
+              <p className="text-xs leading-relaxed text-ink-500">
+                {t.settings.keysHint}
+              </p>
+            </form>
           </Section>
 
           <Section title={t.settings.savedQueries}>

@@ -89,7 +89,9 @@ docker compose up -d          # postgres on :5433, redis on :6379
 
 The provider is behind one interface (`src/ai/types.ts`). `AI_PROVIDER` defaults to
 **`auto`**, which uses the first provider that has a key — so the whole switch is
-"paste a key", and the app still runs with no key at all:
+"paste a key", literally: **Settings → API keys** writes it into `.env` for you
+(the same file, never echoed back on screen), and the app still runs with no key
+at all:
 
 | Provider | When it is used | What it costs |
 | --- | --- | --- |

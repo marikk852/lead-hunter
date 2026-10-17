@@ -160,6 +160,8 @@ export const ru: Dictionary = {
     unknownStatus: "Неизвестный статус.",
     unknownQuery: "Такого элемента больше нет.",
     emptyQuery: "Сначала введите запрос.",
+    keyInvalid:
+      "Такой ключ нельзя сохранить в .env: уберите $, переводы строки и другие управляющие символы.",
     unknown: "Что-то пошло не так. Смотрите журнал активности.",
   },
 
@@ -420,6 +422,15 @@ export const ru: Dictionary = {
     providerActive: "Активен, потому что {reason}.",
     providerSetup:
       "Оценка по правилам не требует ключа. Впишите бесплатный ключ в AI_API_KEY, чтобы перейти на анализ моделью: подойдут Google AI Studio, Groq, OpenRouter или локальный Ollama, а AI_PROVIDER выбирает провайдера явно.",
+    apiKeys: "API-ключи",
+    compatKeyLabel: "Ключ бесплатного провайдера (Google AI Studio, Groq, OpenRouter…)",
+    anthropicKeyLabel: "Ключ Anthropic (необязательно)",
+    keySet: "сохранён — впишите новое значение, чтобы заменить",
+    keyNotSet: "не задан",
+    clearKey: "удалить сохранённый ключ",
+    saveKeys: "Сохранить ключи",
+    keysHint:
+      "Ключи пишутся в .env на сервере и уходят только в API. Поле никогда не показывает сохранённое значение; оставьте его пустым, чтобы не менять то, что уже сохранено.",
     savedQueries: "Сохранённые поисковые запросы",
     queryPlaceholder: "нужен разработчик shopify",
     adding: "Добавляем…",

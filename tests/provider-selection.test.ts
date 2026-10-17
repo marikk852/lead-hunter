@@ -75,6 +75,23 @@ describe("AI_PROVIDER=auto", () => {
     // can be counted as a billable call.
     expect(describeAIProvider().name).toBe("heuristic");
   });
+
+  it("re-reads the environment after Settings saves a key", async () => {
+    const { describeAIProvider, getAIProvider, resetAIProviderCache } = await load();
+
+    // Resolved once with no key at all — the memoized decision.
+    expect(getAIProvider().name).toBe("heuristic");
+
+    // saveAiKeysAction writes .env, sets process.env and calls this.
+    process.env.AI_API_KEY = "key-saved-from-settings";
+    resetAIProviderCache();
+
+    expect(describeAIProvider()).toMatchObject({
+      name: "openai-compatible",
+      keyed: true,
+      reason: "aiApiKey",
+    });
+  });
 });
 
 describe("explicit provider choices", () => {

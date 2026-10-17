@@ -221,3 +221,12 @@ export function getAIProvider(): AIProvider {
 export function describeAIProvider(): ProviderInfo {
   return resolve().info;
 }
+
+/**
+ * Drops the memoized selection so the next call re-reads the environment.
+ * Settings calls this after writing a key into `.env`: without it the console
+ * would keep running the provider that was chosen before the key existed.
+ */
+export function resetAIProviderCache(): void {
+  cached = null;
+}

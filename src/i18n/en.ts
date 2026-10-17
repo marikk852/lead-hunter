@@ -166,6 +166,8 @@ export const en = {
     unknownStatus: "Unknown status.",
     unknownQuery: "That item no longer exists.",
     emptyQuery: "Enter a query first.",
+    keyInvalid:
+      "That key cannot be stored in .env: remove $, line breaks and other control characters.",
     unknown: "Something went wrong. Check the activity log.",
   },
 
@@ -432,6 +434,15 @@ export const en = {
     providerActive: "Active because {reason}.",
     providerSetup:
       "Rule-based scoring needs no key. Put a free key in AI_API_KEY to switch to model analysis: Google AI Studio, Groq, OpenRouter or a local Ollama all work, and AI_PROVIDER picks one explicitly.",
+    apiKeys: "API keys",
+    compatKeyLabel: "Free provider key (Google AI Studio, Groq, OpenRouter…)",
+    anthropicKeyLabel: "Anthropic key (optional)",
+    keySet: "saved — type a new value to replace it",
+    keyNotSet: "not set",
+    clearKey: "remove the saved key",
+    saveKeys: "Save keys",
+    keysHint:
+      "Keys are written to .env on the server and only ever travel to the API. This field never shows a stored value; leave it empty to keep what is saved.",
     savedQueries: "Saved search queries",
     queryPlaceholder: "need a shopify developer",
     adding: "Adding…",
