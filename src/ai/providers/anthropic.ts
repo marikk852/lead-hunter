@@ -34,6 +34,7 @@ import {
   AIProviderError,
   type AIProvider,
   type AnalysisOutcome,
+  type KeyPing,
   type ResponseInput,
   type ResponseOutcome,
   type ScreenOutcome,
@@ -85,6 +86,43 @@ export class AnthropicProvider implements AIProvider {
   constructor(config: AnthropicProviderConfig) {
     this.config = config;
     this.client = config.client ?? new Anthropic({ apiKey: config.apiKey });
+  }
+
+  /**
+   * Live key probe for the Settings monitor: one minimal four-token message.
+   * Server-side errors (429/5xx) get a single retry after a short pause;
+   * auth failures (401/403) are final on the first try.
+   */
+  async ping(): Promise<KeyPing> {
+    const started = Date.now();
+    let lastDetail = "no response";
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        await this.client.messages.create({
+          model: this.config.model,
+          max_tokens: 4,
+          messages: [{ role: "user", content: "ping" }],
+        });
+        return { ok: true, detail: "ok", latencyMs: Date.now() - started };
+      } catch (error) {
+        const status =
+          typeof error === "object" && error !== null && "status" in error
+            ? Number((error as { status?: unknown }).status)
+            : undefined;
+        const message = error instanceof Error ? error.message : String(error);
+        lastDetail = status ? `HTTP ${status}: ${message}` : message;
+        const transient = status === 429 || status === undefined || status >= 500;
+        if (!transient || attempt === 2) break;
+        await new Promise((resolve) => setTimeout(resolve, 400));
+      }
+    }
+
+    return {
+      ok: false,
+      detail: lastDetail.slice(0, 300),
+      latencyMs: Date.now() - started,
+    };
   }
 
   /**

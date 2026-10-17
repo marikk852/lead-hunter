@@ -3,7 +3,7 @@
 import path from "node:path";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { resetAIProviderCache } from "@/src/ai";
+import { resetAIProviderCache, pingAIKey } from "@/src/ai";
 import { requireOwner } from "@/src/auth/session";
 import { prisma } from "@/src/lib/db";
 import { sanitizeApiKey, setEnvValue } from "@/src/lib/envfile";
@@ -134,4 +134,40 @@ export async function saveAiKeysAction(formData: FormData): Promise<void> {
 
   revalidatePath("/settings");
   redirect("/settings?saved=keys");
+}
+
+/**
+ * Runs one live probe of the active AI key and files the result as monitoring
+ * history (Settings → key health). Codes travel in the redirect, the vendor's
+ * own answer is rendered from the stored row — diagnostics are log-line text,
+ * same rule as `lead_events`.
+ */
+export async function checkAiKeyAction(): Promise<void> {
+  await requireOwner();
+
+  const result = await pingAIKey();
+  if (!result.configured) redirect("/settings?error=keyProbeNoKey");
+
+  await prisma.aIHealthCheck.create({
+    data: {
+      provider: result.provider,
+      model: result.model,
+      ok: result.ok,
+      detail: result.detail,
+      latencyMs: result.latencyMs,
+    },
+  });
+
+  // Monitoring history stays bounded: keep the newest 50 probes.
+  const stale = await prisma.aIHealthCheck.findMany({
+    orderBy: { createdAt: "desc" },
+    skip: 50,
+    select: { id: true },
+  });
+  if (stale.length > 0) {
+    await prisma.aIHealthCheck.deleteMany({ where: { id: { in: stale.map((row) => row.id) } } });
+  }
+
+  revalidatePath("/settings");
+  redirect(result.ok ? "/settings?saved=keyOk" : "/settings?error=keyProbeFailed");
 }

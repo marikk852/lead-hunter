@@ -26,6 +26,7 @@ send. It never sends anything itself.
 | Lead detail: analysis, editable draft, activity trail, outcome tracking | ✅ working |
 | Owner profile + saved search queries | ✅ working |
 | Two UI languages (English / Русский) with a switcher | ✅ working — [docs/I18N.md](docs/I18N.md) |
+| API-key health monitor (live probe + history) in Settings | ✅ working |
 | Reddit source adapter + hunt runner (saved queries → pipeline) | ✅ working, needs `npm run hunt` (OAuth optional) |
 | Telegram / web source adapters, workers, Telegram alerts | ⏳ Phase 2+ |
 
@@ -133,6 +134,11 @@ strong model analyses and drafts.
 
 Set `AI_DAILY_CALL_LIMIT` to cap model calls per day; rule-based runs are never
 counted.
+
+Settings → **Key health** probes the active key with one tiny real request and
+files the result (with the provider's own answer and latency) as monitoring
+history — so you can see *when* a free tier went flaky, not just that a lead
+failed. Probes are two attempts max and never spend the analysis budget.
 
 ---
 

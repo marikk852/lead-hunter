@@ -92,16 +92,22 @@ not depend on paid APIs).
 Listed in §1. Additionally, this session end-to-end: a lead created through the
 same `ingestLead` entry point the form calls was analyzed by the live Gemini
 key, scored, and rendered in the UI; Settings → API keys wrote and cleared real
-`.env` lines with the file's other content byte-stable.
+`.env` lines with the file's other content byte-stable. The Settings key
+monitor was exercised against the live free tier in both directions: one probe
+recorded a real `HTTP 503` (vendor message stored verbatim, 2 attempts,
+2292 ms) and the next recorded `HTTP 200` — which is exactly the signal the
+monitor exists to produce.
 
 ## 4. Mocked / simulated only
 
 - **Reddit network responses in tests** — `REDDIT_BASE_URL` points at a local
   stub in the test suites. This is honest test isolation, but it means *the test
-  suite proves the parsing, not live Reddit access*. Live status: **not
-  re-verified in this audit run** (no `REDDIT_CLIENT_ID/SECRET` in `.env`;
-  the unauthenticated public search path exists and is the next thing to probe
-  for real).
+  suite proves the parsing, not live Reddit access*. Live status: **probed
+  2026-10-18 from this network — blocked without credentials**:
+  `www.reddit.com/search.json` → HTTP 403 (block page), `api.reddit.com` → 403,
+  `old.reddit.com` → 302. The unauthenticated fallback is refused by Reddit
+  here, so live Reddit verification is **blocked pending `REDDIT_CLIENT_ID/
+  SECRET`** (user's own app credentials; documented in `.env.example`).
 - **`REDIS_URL`** — documented in `.env.example`, **no redis client in
   dependencies, no code reads it**. Aspirational config; either the Phase 4
   queue uses it or it must be removed from the template.

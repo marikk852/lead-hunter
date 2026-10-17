@@ -238,6 +238,24 @@ model Notification {
   @@map("notifications")
 }
 
+/// One recorded live probe of the configured AI key (Settings → key health).
+/// Append-only monitoring history; the newest rows are rendered on Settings.
+model AIHealthCheck {
+  id        String   @id @default(cuid())
+  /// Which active provider was probed ("openai-compatible" | "anthropic").
+  provider  String
+  model     String
+  ok        Boolean
+  /// Vendor-visible outcome text, kept verbatim from the probe (log-line rule:
+  /// diagnostics stay in the language they were produced in).
+  detail    String
+  latencyMs Int?     @map("latency_ms")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@map("ai_health_checks")
+}
+
 enum SourceKind {
   REDDIT
   TELEGRAM

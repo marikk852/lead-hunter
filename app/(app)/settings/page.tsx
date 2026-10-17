@@ -1,12 +1,13 @@
 import {
   addSearchQueryAction,
+  checkAiKeyAction,
   deleteSearchQueryAction,
   saveAiKeysAction,
   saveProfileAction,
   toggleSearchQueryAction,
 } from "@/app/(app)/settings/actions";
 import { SubmitButton } from "@/src/components/client-buttons";
-import { Section } from "@/src/components/ui";
+import { Section, formatDate } from "@/src/components/ui";
 import { callsUsedToday, describeAIProvider } from "@/src/ai";
 import { SourceKind } from "@/src/generated/prisma/enums";
 import { errorText, getI18n, template } from "@/src/i18n";
@@ -29,12 +30,14 @@ export default async function SettingsPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const { t } = await getI18n();
+  const { t, locale } = await getI18n();
   const params = await searchParams;
-  const [profile, queries, usedToday] = await Promise.all([
+  const [profile, queries, usedToday, checks] = await Promise.all([
     getOwnerProfile(),
     prisma.searchQuery.findMany({ orderBy: { createdAt: "desc" } }),
     callsUsedToday(),
+    // Key-health history, newest first — the monitor renders the last five.
+    prisma.aIHealthCheck.findMany({ orderBy: { createdAt: "desc" }, take: 5 }),
   ]);
   // The *resolved* provider and model — not the raw env strings, which would
   // claim "claude-opus-4-7" while the rules were actually scoring the leads.
@@ -57,7 +60,7 @@ export default async function SettingsPage({
 
       {typeof params.saved === "string" ? (
         <p className="border-l-2 border-signal-green pl-3 text-sm text-signal-green">
-          {t.settings.saved}
+          {params.saved === "keyOk" ? t.settings.keyCheckOk : t.settings.saved}
         </p>
       ) : null}
       {error ? (
@@ -261,6 +264,49 @@ export default async function SettingsPage({
                 {t.settings.keysHint}
               </p>
             </form>
+
+            <div className="mt-4 space-y-2 border-t border-ink-800 pt-4">
+              <p className="label">{t.settings.keyMonitor}</p>
+
+              {checks.length === 0 ? (
+                <p className="text-xs text-ink-500">{t.settings.neverChecked}</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {checks.map((check) => (
+                    <li key={check.id} className="flex items-baseline gap-2 text-xs">
+                      <span
+                        className={check.ok ? "text-signal-green" : "text-hot"}
+                        aria-hidden="true"
+                      >
+                        {check.ok ? "✓" : "✗"}
+                      </span>
+                      <span className="sr-only">
+                        {check.ok ? t.settings.active : t.errors.keyProbeFailed}
+                      </span>
+                      <span className="shrink-0 text-ink-400">
+                        {formatDate(check.createdAt, locale)}
+                      </span>
+                      {check.latencyMs !== null ? (
+                        <span className="num shrink-0 text-ink-500">{check.latencyMs} ms</span>
+                      ) : null}
+                      <span
+                        className={`min-w-0 break-all ${
+                          check.ok ? "text-ink-400" : "text-hot"
+                        }`}
+                      >
+                        {check.detail}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <form action={checkAiKeyAction}>
+                <SubmitButton pendingLabel={t.settings.checking}>
+                  {t.settings.checkNow}
+                </SubmitButton>
+              </form>
+            </div>
           </Section>
 
           <Section title={t.settings.savedQueries}>

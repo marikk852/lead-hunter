@@ -10,7 +10,7 @@ import {
   DEFAULT_COMPAT_MODEL_FAST,
   OpenAICompatibleProvider,
 } from "@/src/ai/providers/openai-compatible";
-import type { AIProvider, AnalysisOutcome, ResponseInput, ResponseOutcome, ScreenOutcome } from "@/src/ai/types";
+import type { AIProvider, AnalysisOutcome, KeyPing, ResponseInput, ResponseOutcome, ScreenOutcome } from "@/src/ai/types";
 import type { LeadPromptInput } from "@/src/ai/schemas";
 import { prisma } from "@/src/lib/db";
 import {
@@ -78,6 +78,18 @@ class BudgetGuardProvider implements AIProvider {
   async generateResponse(input: ResponseInput): Promise<ResponseOutcome> {
     await assertWithinBudget();
     return this.inner.generateResponse(input);
+  }
+
+  /**
+   * Probes are deliberately NOT budget-checked: they are one-token pings, and
+   * verifying that a key still works must never depend on the analysis budget
+   * — that is exactly the moment an owner needs the monitor.
+   */
+  async ping(): Promise<KeyPing> {
+    if (!this.inner.ping) {
+      throw new Error(`provider ${this.name} does not implement ping`);
+    }
+    return this.inner.ping();
   }
 }
 
@@ -220,6 +232,61 @@ export function getAIProvider(): AIProvider {
 /** Which provider is active and why, for the settings screen. */
 export function describeAIProvider(): ProviderInfo {
   return resolve().info;
+}
+
+/** Result of a live key probe, for the Settings monitor. */
+export type KeyCheckResult = KeyPing & {
+  /** False when nothing is keyed — "not configured" is not "broken". */
+  configured: boolean;
+  provider: string;
+  model: string;
+};
+
+/**
+ * One live probe through the *resolved* provider the pipeline itself uses, so
+ * what the monitor tests is exactly what the next analysis will use. Small,
+ * bounded (≤2 attempts), and honest: the vendor's own message travels through
+ * as `detail`.
+ */
+export async function pingAIKey(): Promise<KeyCheckResult> {
+  const info = describeAIProvider();
+
+  if (!info.keyed) {
+    return {
+      ok: false,
+      configured: false,
+      detail: "no key configured — leads are scored by the rules",
+      latencyMs: 0,
+      provider: info.name,
+      model: info.model,
+    };
+  }
+
+  const provider = getAIProvider();
+  if (!provider.ping) {
+    return {
+      ok: false,
+      configured: true,
+      detail: "this provider does not support live probes",
+      latencyMs: 0,
+      provider: info.name,
+      model: info.model,
+    };
+  }
+
+  try {
+    const result = await provider.ping();
+    return { ...result, configured: true, provider: info.name, model: info.model };
+  } catch (error) {
+    return {
+      ok: false,
+      configured: true,
+      detail: error instanceof Error ? error.message : String(error),
+      latencyMs: 0,
+      provider: info.name,
+      model: info.model,
+    };
+  }
 }
 
 /**

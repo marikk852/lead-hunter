@@ -44,6 +44,7 @@ import {
   AIProviderError,
   type AIProvider,
   type AnalysisOutcome,
+  type KeyPing,
   type ResponseInput,
   type ResponseOutcome,
   type ScreenOutcome,
@@ -269,6 +270,50 @@ export class OpenAICompatibleProvider implements AIProvider {
   /** Recorded per run so the settings screen and the audit trail agree. */
   describe() {
     return { provider: this.name, model: this.model, fastModel: this.fastModel, baseUrl: this.baseUrl };
+  }
+
+  /**
+   * Live key probe for the Settings monitor: the smallest request the endpoint
+   * accepts. Retries a transient status once — the free tier spikes 503, and a
+   * monitor that flips red on a blip is noise rather than signal. A 401/403 is
+   * final on the first try: that is exactly the signal the owner needs.
+   */
+  async ping(): Promise<KeyPing> {
+    const started = Date.now();
+    let lastDetail = "no response";
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        const result = await this.call(
+          {
+            model: this.model,
+            messages: [{ role: "user", content: "ping" }],
+            max_completion_tokens: 4,
+          },
+          null,
+          "plain",
+        );
+        const ok = result.status >= 200 && result.status < 300;
+        lastDetail = ok
+          ? `HTTP ${result.status}`
+          : `HTTP ${result.status}: ${
+              messageOf(result.response) || result.text.slice(0, 200) || "empty body"
+            }`;
+        if (ok || !isTransient(result.status)) {
+          return { ok, detail: lastDetail, latencyMs: Date.now() - started };
+        }
+      } catch (error) {
+        // Transport failure: worth one more attempt, then reported as-is.
+        lastDetail = error instanceof Error ? error.message : String(error);
+      }
+      if (attempt < 2) await this.sleep(backoffMs(attempt));
+    }
+
+    return {
+      ok: false,
+      detail: `${lastDetail} (after 2 attempts)`,
+      latencyMs: Date.now() - started,
+    };
   }
 
   /**

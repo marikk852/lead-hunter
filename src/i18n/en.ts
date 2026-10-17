@@ -165,9 +165,11 @@ export const en = {
     noteEmpty: "Note cannot be empty.",
     unknownStatus: "Unknown status.",
     unknownQuery: "That item no longer exists.",
-    emptyQuery: "Enter a query first.",
-    keyInvalid:
+    emptyQuery: "Enter a query first.",    keyInvalid:
       "That key cannot be stored in .env: remove $, line breaks and other control characters.",
+    keyProbeFailed:
+      "The live probe failed — the provider's own answer is in the key health list below.",
+    keyProbeNoKey: "No API key is configured, so there is nothing to test. Save a key first.",
     unknown: "Something went wrong. Check the activity log.",
   },
 
@@ -443,6 +445,12 @@ export const en = {
     saveKeys: "Save keys",
     keysHint:
       "Keys are written to .env on the server and only ever travel to the API. This field never shows a stored value; leave it empty to keep what is saved.",
+    keyMonitor: "Key health",
+    neverChecked:
+      "Not checked yet. A check makes one tiny real request to the provider — a few tokens, not the analysis budget.",
+    checkNow: "Check the key now",
+    checking: "Checking…",
+    keyCheckOk: "The key works — the live probe succeeded.",
     savedQueries: "Saved search queries",
     queryPlaceholder: "need a shopify developer",
     adding: "Adding…",
