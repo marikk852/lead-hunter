@@ -64,6 +64,7 @@ const urgencies: Record<Urgency, string> = {
 
 const sourceKinds: Record<SourceKind, string> = {
   REDDIT: "Reddit",
+  PERPLEXITY: "Perplexity",
   TELEGRAM: "Telegram",
   WEB: "Веб",
   X: "X",
@@ -301,6 +302,7 @@ export const ru: Dictionary = {
       budget: "Бюджет",
       urgency: "Срочность",
       source: "Источник",
+      query: "Найден по запросу",
       author: "Автор",
       location: "Локация",
       business: "Бизнес",
@@ -444,6 +446,24 @@ export const ru: Dictionary = {
     adding: "Добавляем…",
     noQueries: "Запросов пока нет. Они будут управлять адаптерами источников на Фазе 2.",
     starterQueries: "Стартовые запросы",
+    discovery: "Запуски поиска",
+    discoveryHint:
+      "Одна строка на запуск. «Проверено, ничего нет» — это успешная проверка без новых публикаций; упавший источник показан как ошибка, а не спрятан.",
+    noRuns: "Запусков пока нет. Выполните npm run hunt или установите cron-запись из docs/OPERATIONS.md.",
+    runStatuses: {
+      RUNNING: "выполняется",
+      SUCCEEDED: "успешно",
+      PARTIAL: "частично",
+      FAILED: "ошибка",
+    },
+    sourceStatuses: {
+      OK: "ок",
+      EMPTY: "проверено, ничего нет",
+      ERROR: "ошибка",
+      SKIPPED: "пропущено",
+    },
+    runMeta: "{status} · {trigger} · {when}",
+    runCounts: "{discovered} найдено · {created} новых · {duplicates} дубликатов · {failed} ошибок",
   },
 
   enums: {

@@ -78,6 +78,7 @@ export async function getLeadDetail(id: string) {
     where: { id },
     include: {
       source: true,
+      searchQuery: { select: { id: true, query: true } },
       events: { orderBy: { createdAt: "desc" } },
       analyses: { orderBy: { createdAt: "desc" }, take: 5 },
       outreach: { orderBy: { createdAt: "desc" } },

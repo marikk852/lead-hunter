@@ -15,7 +15,9 @@ import { SourceKind } from "@/src/generated/prisma/enums";
 import { ingestLead, type IngestResult } from "@/src/leads/pipeline";
 import { prisma } from "@/src/lib/db";
 import { logger } from "@/src/lib/logger";
-import type { SourceAdapter, SourceItem } from "@/src/sources/types";
+import { SourceAdapterError, type SourceAdapter, type SourceErrorCode, type SourceItem } from "@/src/sources/types";
+
+export type { SourceErrorCode } from "@/src/sources/types";
 
 /** The slice of the database this runner needs, so tests can inject a fake. */
 export type HuntStore = {
@@ -23,6 +25,17 @@ export type HuntStore = {
   sources(ids: string[]): Promise<Array<{ id: string; adapter: string; kind: SourceKind; enabled: boolean }>>;
   markQueryRun(queryId: string, at: Date): Promise<void>;
   markSourceScan(sourceId: string, at: Date): Promise<void>;
+  /** Persists the adapter's last outcome on the Source row (Settings health). */
+  markSourceHealth?(sourceId: string, at: Date, health: SourceHealth): Promise<void>;
+};
+
+/** What the last scan of a source looked like — shown in Settings. */
+export type SourceHealth = {
+  ok: boolean;
+  checkedAt: string;
+  detail: string;
+  items: number;
+  errorCode?: SourceErrorCode;
 };
 
 export const prismaHuntStore: HuntStore = {
@@ -49,6 +62,13 @@ export const prismaHuntStore: HuntStore = {
 
   async markSourceScan(sourceId, at) {
     await prisma.source.update({ where: { id: sourceId }, data: { lastScanAt: at } });
+  },
+
+  async markSourceHealth(sourceId, at, health) {
+    await prisma.source.update({
+      where: { id: sourceId },
+      data: { lastScanAt: at, health: health as unknown as object },
+    });
   },
 };
 
@@ -77,8 +97,41 @@ export type HuntSummary = {
   /** Set when the run stopped early instead of finishing every query. */
   stopped: "budgetExceeded" | null;
   leads: Array<{ leadId: string; score: number; temperature: string; title: string }>;
-  errors: Array<{ adapter: string; query: string; message: string }>;
+  errors: Array<{ adapter: string; query: string; message: string; code?: SourceErrorCode }>;
+  /**
+   * One row per adapter search: the difference between "checked, found nothing"
+   * (EMPTY) and "the source failed" (ERROR) is the whole point.
+   */
+  sourceResults: SourceRunResult[];
 };
+
+export type SourceRunResult = {
+  adapter: string;
+  queryId: string | null;
+  query: string;
+  status: "OK" | "EMPTY" | "ERROR" | "SKIPPED";
+  items: number;
+  message?: string;
+  code?: SourceErrorCode;
+  durationMs: number;
+};
+
+/** Reads the structured code when an adapter provides one, else classifies the message. */
+export function sourceErrorCode(error: unknown): SourceErrorCode {
+  if (error instanceof SourceAdapterError) return error.code;
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string" && code.length > 0) return code as SourceErrorCode;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if (/\b429\b|rate.?limit/i.test(message)) return "rateLimited";
+  if (/timeout|timed out|aborted/i.test(message)) return "timeout";
+  if (/\b401\b|\b403\b|unauthori[sz]ed|forbidden|credentials/i.test(message)) return "auth";
+  if (/non-JSON|parse|invalid json/i.test(message)) return "parse";
+  if (/fetch failed|ENOTFOUND|ECONN|network/i.test(message)) return "network";
+  if (/\b\d{3}\b/.test(message)) return "http";
+  return "unknown";
+}
 
 export const DEFAULT_LIMIT_PER_QUERY = 25;
 
@@ -137,6 +190,7 @@ export async function runHunt(options: HuntOptions): Promise<HuntSummary> {
     stopped: null,
     leads: [],
     errors: [],
+    sourceResults: [],
   };
 
   const queries = await store.enabledQueries();
@@ -152,20 +206,76 @@ export async function runHunt(options: HuntOptions): Promise<HuntSummary> {
     const adapters = matchAdapters(query, options.adapters, sources);
     summary.queriesRun += 1;
 
+    if (adapters.length === 0) {
+      const configured = query.sourceId ? sources.get(query.sourceId)?.adapter : null;
+      summary.sourceResults.push({
+        adapter: configured ?? "none",
+        queryId: query.id,
+        query: query.query,
+        status: "SKIPPED",
+        items: 0,
+        message: configured
+          ? `adapter "${configured}" is not configured or its source is disabled`
+          : "no adapter matches this query",
+        code: "unknown",
+        durationMs: 0,
+      });
+    }
+
     for (const adapter of adapters) {
       if (summary.stopped) break;
 
+      const startedAt = Date.now();
       let items: SourceItem[];
       try {
         items = await adapter.search({ query: query.query, limit });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        logger.warn("source search failed", { adapter: adapter.name, query: query.query, message });
-        summary.errors.push({ adapter: adapter.name, query: query.query, message });
+        const code = sourceErrorCode(error);
+        logger.warn("source search failed", { adapter: adapter.name, query: query.query, code, message });
+        summary.errors.push({ adapter: adapter.name, query: query.query, message, code });
+        summary.sourceResults.push({
+          adapter: adapter.name,
+          queryId: query.id,
+          query: query.query,
+          status: "ERROR",
+          items: 0,
+          message,
+          code,
+          durationMs: Date.now() - startedAt,
+        });
+        if (query.sourceId) {
+          await store.markSourceHealth?.(query.sourceId, now, {
+            ok: false,
+            checkedAt: now.toISOString(),
+            detail: `${code}: ${message}`.slice(0, 500),
+            items: 0,
+            errorCode: code,
+          });
+        }
         continue;
       }
 
       summary.discovered += items.length;
+      summary.sourceResults.push({
+        adapter: adapter.name,
+        queryId: query.id,
+        query: query.query,
+        status: items.length > 0 ? "OK" : "EMPTY",
+        items: items.length,
+        durationMs: Date.now() - startedAt,
+      });
+      if (query.sourceId) {
+        await store.markSourceHealth?.(query.sourceId, now, {
+          ok: true,
+          checkedAt: now.toISOString(),
+          detail:
+            items.length > 0
+              ? `${items.length} item(s) returned`
+              : "checked, no items returned",
+          items: items.length,
+        });
+      }
 
       for (const item of items) {
         options.onItem?.(adapter.name, query.query, item);
@@ -181,6 +291,7 @@ export async function runHunt(options: HuntOptions): Promise<HuntSummary> {
             sourceCreatedAt: item.createdAt,
             sourceKind: adapter.kind,
             sourceName: adapter.name,
+            searchQueryId: query.id,
           });
           tally(summary, result, item.title ?? item.content.slice(0, 80));
         } catch (error) {
@@ -193,7 +304,12 @@ export async function runHunt(options: HuntOptions): Promise<HuntSummary> {
           const message = error instanceof Error ? error.message : String(error);
           logger.warn("source item failed", { adapter: adapter.name, message });
           summary.failed += 1;
-          summary.errors.push({ adapter: adapter.name, query: query.query, message });
+          summary.errors.push({
+            adapter: adapter.name,
+            query: query.query,
+            message,
+            code: sourceErrorCode(error),
+          });
         }
       }
     }

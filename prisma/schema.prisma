@@ -49,7 +49,9 @@ model SearchQuery {
   createdAt  DateTime  @default(now()) @map("created_at")
   updatedAt  DateTime  @updatedAt @map("updated_at")
 
-  source Source? @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  source        Source?           @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  leads         Lead[]
+  scanResults   ScanSourceResult[]
 
   @@index([enabled])
   @@map("search_queries")
@@ -94,6 +96,8 @@ model Lead {
 
   /// Deterministic fingerprint of the normalized content (README §14).
   contentHash String @map("content_hash")
+  /// Which saved query found this lead (discovery provenance, nullable for manual entry).
+  searchQueryId String? @map("search_query_id")
   /// Set when this lead was merged into an earlier one.
   duplicateOfId String? @map("duplicate_of_id")
   /// Score/reason trail so a human can see why a score was assigned.
@@ -105,6 +109,7 @@ model Lead {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   source      Source        @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  searchQuery SearchQuery?  @relation(fields: [searchQueryId], references: [id], onDelete: SetNull)
   duplicateOf Lead?         @relation("LeadDuplicates", fields: [duplicateOfId], references: [id], onDelete: SetNull)
   duplicates  Lead[]        @relation("LeadDuplicates")
   analyses    AIAnalysis[]
@@ -115,6 +120,7 @@ model Lead {
 
   @@unique([sourceId, sourceExternalId])
   @@index([contentHash])
+  @@index([searchQueryId])
   @@index([status])
   @@index([temperature])
   @@index([leadScore])
@@ -238,6 +244,68 @@ model Notification {
   @@map("notifications")
 }
 
+/// One discovery scan (manual or scheduled). This is the run log: totals plus a
+/// per-source result row, so "the source was checked, found nothing" is
+/// distinguishable from "the source failed".
+model ScanRun {
+  id         String        @id @default(cuid())
+  /// "manual" | "cron" | "cli"
+  trigger    String        @default("manual")
+  dryRun     Boolean       @default(false) @map("dry_run")
+  status     ScanRunStatus @default(RUNNING)
+  startedAt  DateTime      @default(now()) @map("started_at")
+  finishedAt DateTime?     @map("finished_at")
+
+  queriesRun Int @default(0) @map("queries_run")
+  discovered Int @default(0)
+  created    Int @default(0)
+  duplicates Int @default(0)
+  invalid    Int @default(0)
+  failed     Int @default(0)
+  /// "budgetExceeded" when the run stopped at the daily AI limit.
+  stopped    String?
+  error      String?
+  summary    Json?
+
+  results ScanSourceResult[]
+
+  @@index([startedAt])
+  @@index([status])
+  @@map("scan_runs")
+}
+
+/// Outcome of one adapter search inside one ScanRun.
+model ScanSourceResult {
+  id         String           @id @default(cuid())
+  runId      String           @map("run_id")
+  adapter    String
+  queryId    String?          @map("query_id")
+  query      String
+  status     ScanSourceStatus
+  items      Int              @default(0)
+  message    String?
+  durationMs Int?             @map("duration_ms")
+  createdAt  DateTime         @default(now()) @map("created_at")
+
+  run    ScanRun      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  source SearchQuery? @relation(fields: [queryId], references: [id], onDelete: SetNull)
+
+  @@index([runId])
+  @@map("scan_source_results")
+}
+
+/// Single-row lock used to prevent two hunts from running at once. Acquired with
+/// an atomic conditional UPDATE, so it also survives a crashed process (the
+/// lease expires) without a daemon.
+model JobLock {
+  id          String   @id
+  lockedBy    String   @map("locked_by")
+  lockedUntil DateTime @map("locked_until")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("job_locks")
+}
+
 /// One recorded live probe of the configured AI key (Settings → key health).
 /// Append-only monitoring history; the newest rows are rendered on Settings.
 model AIHealthCheck {
@@ -258,6 +326,7 @@ model AIHealthCheck {
 
 enum SourceKind {
   REDDIT
+  PERPLEXITY
   TELEGRAM
   WEB
   X
@@ -320,6 +389,24 @@ enum AnalysisStatus {
   PENDING
   SUCCEEDED
   FAILED
+  SKIPPED
+}
+
+enum ScanRunStatus {
+  RUNNING
+  SUCCEEDED
+  PARTIAL
+  FAILED
+}
+
+enum ScanSourceStatus {
+  /// The adapter answered; `items` may be zero (checked, nothing new).
+  OK
+  /// The adapter answered with no items at all.
+  EMPTY
+  /// The query failed (network, 429, auth, parse).
+  ERROR
+  /// The query was not run (adapter disabled or unavailable).
   SKIPPED
 }
 

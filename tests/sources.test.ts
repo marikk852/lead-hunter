@@ -106,10 +106,81 @@ describe("RedditAdapter request shape", () => {
 
   it("fails loudly on a non-JSON or error response", async () => {
     const { fetchImpl } = stub(() => ({ status: 429, text: "slow down" }));
-    await expect(new RedditAdapter({ fetch: fetchImpl }).search({ query: "x", limit: 1 })).rejects.toThrow(/429/);
+    await expect(
+      new RedditAdapter({ fetch: fetchImpl, maxRetries: 0 }).search({ query: "x", limit: 1 }),
+    ).rejects.toMatchObject({ code: "rateLimited", status: 429 });
 
     const { fetchImpl: badJson } = stub(() => ({ status: 200, text: "<html>nope</html>" }));
-    await expect(new RedditAdapter({ fetch: badJson }).search({ query: "x", limit: 1 })).rejects.toThrow(/non-JSON/);
+    await expect(new RedditAdapter({ fetch: badJson }).search({ query: "x", limit: 1 })).rejects.toThrow(
+      /non-JSON/,
+    );
+  });
+
+  it("retries a 429 with backoff instead of losing the query", async () => {
+    const delays: number[] = [];
+    const { calls, fetchImpl } = stub((_call, index) =>
+      index < 2
+        ? { status: 429, text: "slow down" }
+        : { status: 200, text: listing([post()]) },
+    );
+
+    const items = await new RedditAdapter({
+      fetch: fetchImpl,
+      maxRetries: 2,
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+    }).search({ query: "woocommerce", limit: 5 });
+
+    expect(items).toHaveLength(1);
+    expect(calls).toHaveLength(3);
+    expect(delays).toHaveLength(2);
+    // Exponential, so a hammered free endpoint is not hit in a tight loop.
+    expect(delays[1]).toBeGreaterThan(delays[0]);
+  });
+
+  it("honours Retry-After when the source sends one", async () => {
+    const delays: number[] = [];
+    const { fetchImpl } = stub((_call, index) =>
+      index === 0
+        ? { status: 429, text: "slow down" }
+        : { status: 200, text: listing([]) },
+    );
+
+    await new RedditAdapter({
+      maxRetries: 1,
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+      fetch: async (url, init) => {
+        const response = await fetchImpl(url, init);
+        return {
+          ...response,
+          headers: { get: (name: string) => (name.toLowerCase() === "retry-after" ? "2" : null) },
+        };
+      },
+    }).search({ query: "x", limit: 1 });
+
+    expect(delays).toEqual([2_000]);
+  });
+
+  it("classifies a timeout and a 403 so the run log can tell them apart", async () => {
+    const timeoutFetch: RedditFetch = async () => {
+      const error = new Error("aborted");
+      error.name = "AbortError";
+      throw error;
+    };
+    await expect(
+      new RedditAdapter({ fetch: timeoutFetch, maxRetries: 0, timeoutMs: 10 }).search({
+        query: "x",
+        limit: 1,
+      }),
+    ).rejects.toMatchObject({ code: "timeout" });
+
+    const { fetchImpl } = stub(() => ({ status: 403, text: "blocked" }));
+    await expect(
+      new RedditAdapter({ fetch: fetchImpl, maxRetries: 0 }).search({ query: "x", limit: 1 }),
+    ).rejects.toMatchObject({ code: "auth", status: 403 });
   });
 });
 
@@ -169,12 +240,16 @@ function fakeAdapter(
   };
 }
 
-function fakeStore(overrides: Partial<HuntStore> = {}): HuntStore & { marked: string[]; scanned: string[] } {
+function fakeStore(
+  overrides: Partial<HuntStore> = {},
+): HuntStore & { marked: string[]; scanned: string[]; health: Array<{ id: string; ok: boolean }> } {
   const marked: string[] = [];
   const scanned: string[] = [];
+  const health: Array<{ id: string; ok: boolean }> = [];
   return {
     marked,
     scanned,
+    health,
     enabledQueries: async () => [{ id: "q1", query: "need a website", sourceId: null }],
     sources: async () => [],
     markQueryRun: async (id) => {
@@ -182,6 +257,9 @@ function fakeStore(overrides: Partial<HuntStore> = {}): HuntStore & { marked: st
     },
     markSourceScan: async (id) => {
       scanned.push(id);
+    },
+    markSourceHealth: async (id, _at, value) => {
+      health.push({ id, ok: value.ok });
     },
     ...overrides,
   };
@@ -257,10 +335,67 @@ describe("runHunt", () => {
       ingest: vi.fn(async () => ({ outcome: "invalid", code: "contentEmpty" }) as IngestResult),
     });
 
-    expect(summary.errors).toEqual([{ adapter: "reddit", query: "need a website", message: "reddit search failed (503)" }]);
+    expect(summary.errors).toEqual([
+      { adapter: "reddit", query: "need a website", message: "reddit search failed (503)", code: "http" },
+    ]);
     expect(summary.discovered).toBe(0);
     // The query is still marked as run, so a broken source does not loop forever.
     expect((summary as unknown as { queriesRun: number }).queriesRun).toBe(1);
+    expect(summary.sourceResults).toEqual([
+      expect.objectContaining({ adapter: "reddit", status: "ERROR", code: "http" }),
+    ]);
+  });
+
+  it("distinguishes \"checked, nothing found\" from a failure and records source health", async () => {
+    const store = fakeStore({
+      enabledQueries: async () => [{ id: "q1", query: "x", sourceId: "s1" }],
+      sources: async () => [{ id: "s1", adapter: "reddit", kind: "REDDIT" as SourceKind, enabled: true }],
+    });
+
+    const empty = await runHunt({
+      adapters: [fakeAdapter("reddit", [])],
+      store,
+      ingest: vi.fn(async () => ({ outcome: "invalid", code: "contentEmpty" }) as IngestResult),
+    });
+
+    expect(empty.sourceResults).toEqual([
+      expect.objectContaining({ status: "EMPTY", items: 0, adapter: "reddit" }),
+    ]);
+    expect(empty.errors).toEqual([]);
+    expect(store.health).toEqual([{ id: "s1", ok: true }]);
+
+    const failing = fakeStore({
+      enabledQueries: async () => [{ id: "q1", query: "x", sourceId: "s1" }],
+      sources: async () => [{ id: "s1", adapter: "reddit", kind: "REDDIT" as SourceKind, enabled: true }],
+    });
+    const down = await runHunt({
+      adapters: [
+        fakeAdapter("reddit", [], "REDDIT", async () => {
+          throw new Error("reddit search failed (403): blocked");
+        }),
+      ],
+      store: failing,
+      ingest: vi.fn(async () => ({ outcome: "invalid", code: "contentEmpty" }) as IngestResult),
+    });
+
+    expect(down.sourceResults[0]).toMatchObject({ status: "ERROR", code: "auth" });
+    expect(failing.health).toEqual([{ id: "s1", ok: false }]);
+  });
+
+  it("reports a skipped query when no configured adapter can serve it", async () => {
+    const store = fakeStore({
+      enabledQueries: async () => [{ id: "q1", query: "x", sourceId: "s1" }],
+      sources: async () => [{ id: "s1", adapter: "perplexity", kind: "PERPLEXITY" as SourceKind, enabled: true }],
+    });
+
+    const summary = await runHunt({
+      adapters: [fakeAdapter("reddit", [item])],
+      store,
+      ingest: vi.fn(async () => ({ outcome: "invalid", code: "contentEmpty" }) as IngestResult),
+    });
+
+    expect(summary.sourceResults[0]).toMatchObject({ status: "SKIPPED", adapter: "perplexity" });
+    expect(summary.discovered).toBe(0);
   });
 
   it("stops the whole run when the daily AI budget is exhausted", async () => {

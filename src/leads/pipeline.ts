@@ -8,7 +8,9 @@
  * Long scans do not belong here — the pipeline is per-item so it can be driven
  * by a request today and by a queue worker in Phase 2 (§28) without changes.
  */
-import { getAIProvider } from "@/src/ai";
+import { BudgetExceededError, getAIProvider } from "@/src/ai";
+import { PROMPT_VERSION } from "@/src/ai/prompts";
+import type { ScreenOutcome } from "@/src/ai/types";
 import { toDbShape, type LeadAnalysis, type LeadPromptInput } from "@/src/ai/schemas";
 import { AIProviderError } from "@/src/ai/types";
 import { AnalysisStage, EventType, SourceKind } from "@/src/generated/prisma/enums";
@@ -38,6 +40,14 @@ export type IngestInput = {
   sourceId?: string;
   sourceKind?: SourceKind;
   sourceName?: string;
+  /** Saved query that produced this item (discovery provenance). */
+  searchQueryId?: string | null;
+  /**
+   * Run the cheap first-stage screen before the full analysis. Defaults to on,
+   * except for manual entry: the owner pasted that post deliberately, so it is
+   * analysed in full rather than filtered by a model.
+   */
+  screen?: boolean;
   analysisPromptVersion?: string;
 };
 
@@ -218,6 +228,7 @@ export async function ingestLead(input: IngestInput, now: Date = new Date()): Pr
         title: input.title ?? null,
         originalContent: content,
         contentHash: hash,
+        searchQueryId: input.searchQueryId ?? null,
       },
     });
   } catch (error) {
@@ -261,12 +272,18 @@ export async function ingestLead(input: IngestInput, now: Date = new Date()): Pr
       leadId: lead.id,
       type: EventType.DISCOVERED,
       message: `Lead discovered via ${source.kind.toLowerCase()} source "${source.name}"`,
-      metadata: { sourceAuthor: input.sourceAuthor ?? null, sourceUrl: input.sourceUrl ?? null },
+      metadata: {
+        sourceAuthor: input.sourceAuthor ?? null,
+        sourceUrl: input.sourceUrl ?? null,
+        searchQueryId: input.searchQueryId ?? null,
+      },
     },
   });
 
   const promptInput = toPromptInput({ ...input, content }, source.kind);
-  return analyzeLeadInternal(lead.id, promptInput);
+  return analyzeLeadInternal(lead.id, promptInput, {
+    screen: input.screen ?? source.kind !== SourceKind.MANUAL,
+  });
 }
 
 /**
@@ -275,6 +292,7 @@ export async function ingestLead(input: IngestInput, now: Date = new Date()): Pr
 export async function analyzeLeadInternal(
   leadId: string,
   promptInput: LeadPromptInput,
+  options: { screen?: boolean } = {},
 ): Promise<IngestResult> {
   const provider = getAIProvider();
   const profile = await getOwnerProfile();
@@ -283,6 +301,90 @@ export async function analyzeLeadInternal(
   let model = "unknown";
   let notes: string[] = [];
   let warning: IngestWarningCode | undefined;
+
+  // Stage A (SPEC §9 two-layer discovery): a cheap screen decides whether the
+  // expensive full analysis is worth buying. A screened-out post is stored and
+  // archived with the screen's own reason, so the owner can overturn it — it is
+  // never silently dropped, and it never reaches the FULL model call.
+  if (options.screen !== false && provider.screen) {
+    try {
+      const screened: ScreenOutcome = await provider.screen(promptInput);
+      await prisma.aIAnalysis.create({
+        data: {
+          leadId,
+          provider: screened.provider,
+          model: screened.model,
+          promptVersion: screened.promptVersion,
+          stage: AnalysisStage.SCREEN,
+          raw: (screened.raw ?? {}) as object,
+          parsed: screened.screen as unknown as object,
+          usage: (screened.usage ?? undefined) as object | undefined,
+          status: "SUCCEEDED",
+        },
+      });
+
+      if (!screened.screen.isCandidate) {
+        const reason = screened.screen.reason.trim() || "Screened out before full analysis.";
+        await prisma.$transaction([
+          prisma.lead.update({
+            where: { id: leadId },
+            data: {
+              analysisStatus: "SKIPPED",
+              aiModel: `${screened.provider}:${screened.model}`,
+              aiProcessedAt: new Date(),
+              leadScore: 0,
+              temperature: "COLD",
+              status: "ARCHIVED",
+              scoreBreakdown: {
+                total: 0,
+                temperature: "COLD",
+                stage: "SCREEN",
+                confidence: screened.screen.confidence,
+                reason,
+                notes: screened.notes,
+              } as unknown as object,
+            },
+          }),
+          prisma.leadEvent.create({
+            data: {
+              leadId,
+              type: EventType.ANALYZED,
+              message: `Screened out by ${screened.provider} (${screened.model}) before full analysis: ${reason}`,
+              metadata: {
+                stage: "SCREEN",
+                isCandidate: false,
+                confidence: screened.screen.confidence,
+                usage: screened.usage ?? null,
+              } as object,
+            },
+          }),
+        ]);
+
+        logger.info("lead screened out", {
+          leadId,
+          provider: screened.provider,
+          model: screened.model,
+          confidence: screened.screen.confidence,
+        });
+
+        return {
+          outcome: "created",
+          leadId,
+          score: 0,
+          temperature: "COLD",
+          analysisStatus: "SKIPPED",
+        };
+      }
+
+      notes = screened.notes;
+    } catch (error) {
+      // A broken screen must not cost a discovery: fall through to the full
+      // analysis and record that the cheap stage did not run.
+      const message = error instanceof Error ? error.message : String(error);
+      notes.push(`screen failed, continued to full analysis: ${message}`);
+      logger.warn("lead screen failed; continuing to full analysis", { leadId, error: message });
+    }
+  }
 
   try {
     const outcome = await provider.analyzeLead(promptInput);
@@ -393,6 +495,11 @@ export async function analyzeLeadInternal(
       analysisStatus: "SUCCEEDED",
     };
   } catch (error) {
+    // The daily ceiling is not a per-lead failure: every further item would hit
+    // the same wall. Rethrow so the hunt runner can stop the whole scan instead
+    // of buying (and failing) one call per remaining post.
+    if (error instanceof BudgetExceededError) throw error;
+
     const message = error instanceof Error ? error.message : String(error);
 
     await prisma.aIAnalysis.create({
@@ -400,7 +507,7 @@ export async function analyzeLeadInternal(
         leadId,
         provider: providerName,
         model,
-        promptVersion: promptInput.sourceKind,
+        promptVersion: PROMPT_VERSION,
         stage: AnalysisStage.FULL,
         status: "FAILED",
         error: message,
@@ -450,12 +557,18 @@ export async function reanalyzeLead(leadId: string): Promise<IngestResult> {
   });
   if (!lead) return { outcome: "invalid", code: "notFound" };
 
-  return analyzeLeadInternal(leadId, {
-    title: lead.title,
-    content: lead.originalContent,
-    sourceKind: lead.source.kind,
-    sourceAuthor: lead.sourceAuthor,
-    sourceCreatedAt: lead.sourceCreatedAt,
-    sourceUrl: lead.sourceUrl,
-  });
+  return analyzeLeadInternal(
+    leadId,
+    {
+      title: lead.title,
+      content: lead.originalContent,
+      sourceKind: lead.source.kind,
+      sourceAuthor: lead.sourceAuthor,
+      sourceCreatedAt: lead.sourceCreatedAt,
+      sourceUrl: lead.sourceUrl,
+    },
+    // The owner asked for a full re-run explicitly; do not let the screen
+    // silently override that decision.
+    { screen: false },
+  );
 }

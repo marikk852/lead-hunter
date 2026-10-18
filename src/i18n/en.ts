@@ -68,6 +68,7 @@ const urgencies: Record<Urgency, string> = {
 
 const sourceKinds: Record<SourceKind, string> = {
   REDDIT: "Reddit",
+  PERPLEXITY: "Perplexity",
   TELEGRAM: "Telegram",
   WEB: "Web",
   X: "X",
@@ -309,6 +310,7 @@ export const en = {
       budget: "Budget",
       urgency: "Urgency",
       source: "Source",
+      query: "Found by query",
       author: "Author",
       location: "Location",
       business: "Business",
@@ -456,6 +458,24 @@ export const en = {
     adding: "Adding…",
     noQueries: "No queries yet. These drive the Phase 2 source adapters.",
     starterQueries: "Starter queries",
+    discovery: "Discovery runs",
+    discoveryHint:
+      "One row per run. \"Checked, no items\" is a successful check with nothing new; a failed source is listed as an error, not hidden.",
+    noRuns: "No scan recorded yet. Run npm run hunt, or install the cron entry described in docs/OPERATIONS.md.",
+    runStatuses: {
+      RUNNING: "running",
+      SUCCEEDED: "succeeded",
+      PARTIAL: "partial",
+      FAILED: "failed",
+    },
+    sourceStatuses: {
+      OK: "ok",
+      EMPTY: "checked, no items",
+      ERROR: "error",
+      SKIPPED: "skipped",
+    },
+    runMeta: "{status} · {trigger} · {when}",
+    runCounts: "{discovered} found · {created} new · {duplicates} duplicates · {failed} failed",
   },
 
   enums: {

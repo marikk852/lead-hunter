@@ -153,6 +153,7 @@ export default async function LeadDetailPage({
           />
           <Field label={t.lead.fields.urgency} value={t.enums.urgencies[lead.urgency]} mono />
           <Field label={t.lead.fields.source} value={t.enums.sourceKinds[lead.source.kind]} mono />
+          <Field label={t.lead.fields.query} value={lead.searchQuery?.query ?? null} />
           <Field label={t.lead.fields.author} value={lead.sourceAuthor} mono />
           <Field label={t.lead.fields.location} value={lead.location} />
           <Field label={t.lead.fields.business} value={lead.businessType} />

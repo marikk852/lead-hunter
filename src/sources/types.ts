@@ -35,7 +35,45 @@ export type AdapterHealth = {
   /** Short human-readable detail, e.g. "authenticated as script app". */
   detail: string;
   checkedAt: Date;
+  /** Machine-readable failure class, so the UI and run log can group failures. */
+  code?: SourceErrorCode;
 };
+
+/**
+ * Why an adapter call failed. The runner stores this next to the error text so
+ * "rate-limited" is distinguishable from "bad credentials" in the run log —
+ * they need different responses from the owner.
+ */
+export type SourceErrorCode =
+  | "rateLimited"
+  | "timeout"
+  | "auth"
+  | "http"
+  | "network"
+  | "parse"
+  | "unknown";
+
+/** An adapter failure the runner can classify without parsing a message. */
+export class SourceAdapterError extends Error {
+  constructor(
+    message: string,
+    readonly code: SourceErrorCode,
+    readonly status?: number,
+    readonly retryAfterMs?: number,
+    readonly cause?: unknown,
+  ) {
+    super(message);
+    this.name = "SourceAdapterError";
+  }
+}
+
+/** Maps an HTTP status to the failure class the owner cares about. */
+export function sourceErrorForStatus(status: number): SourceErrorCode {
+  if (status === 401 || status === 403) return "auth";
+  if (status === 429) return "rateLimited";
+  if (status >= 500) return "http";
+  return "http";
+}
 
 export interface SourceAdapter {
   /** Slug stored on `Source.adapter` ("reddit", "telegram", …). */

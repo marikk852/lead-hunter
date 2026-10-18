@@ -13,6 +13,7 @@ import { SourceKind } from "@/src/generated/prisma/enums";
 import { errorText, getI18n, template } from "@/src/i18n";
 import { prisma } from "@/src/lib/db";
 import { hasCompatKey, hasOwnAnthropicKey } from "@/src/lib/env";
+import { recentScanRuns } from "@/src/sources/job";
 import { DEFAULT_PROFILE, getOwnerProfile, isProfileUnconfigured } from "@/src/profile";
 
 const SUGGESTED_QUERIES = [
@@ -32,12 +33,14 @@ export default async function SettingsPage({
 }) {
   const { t, locale } = await getI18n();
   const params = await searchParams;
-  const [profile, queries, usedToday, checks] = await Promise.all([
+  const [profile, queries, usedToday, checks, runs] = await Promise.all([
     getOwnerProfile(),
     prisma.searchQuery.findMany({ orderBy: { createdAt: "desc" } }),
     callsUsedToday(),
     // Key-health history, newest first — the monitor renders the last five.
     prisma.aIHealthCheck.findMany({ orderBy: { createdAt: "desc" }, take: 5 }),
+    // Discovery run log, so a scheduled scan is visible without the terminal.
+    recentScanRuns(3),
   ]);
   // The *resolved* provider and model — not the raw env strings, which would
   // claim "claude-opus-4-7" while the rules were actually scoring the leads.
@@ -325,6 +328,7 @@ export default async function SettingsPage({
                   {(
                     [
                       SourceKind.REDDIT,
+                      SourceKind.PERPLEXITY,
                       SourceKind.TELEGRAM,
                       SourceKind.WEB,
                       SourceKind.X,
@@ -388,6 +392,60 @@ export default async function SettingsPage({
                 ))}
               </ul>
             </details>
+          </Section>
+
+          <Section title={t.settings.discovery}>
+            <p className="text-xs leading-relaxed text-ink-500">{t.settings.discoveryHint}</p>
+
+            {runs.length === 0 ? (
+              <p className="mt-3 text-xs text-ink-500">{t.settings.noRuns}</p>
+            ) : (
+              <ul className="mt-3 space-y-3">
+                {runs.map((run) => (
+                  <li key={run.id} className="border-t border-ink-800 pt-2 first:border-0 first:pt-0">
+                    <p className="text-xs text-ink-300">
+                      {template(t.settings.runMeta, {
+                        status: t.settings.runStatuses[run.status],
+                        trigger: run.trigger,
+                        when: formatDate(run.startedAt, locale),
+                      })}
+                    </p>
+                    <p className="num text-xs text-ink-500">
+                      {template(t.settings.runCounts, {
+                        discovered: String(run.discovered),
+                        created: String(run.created),
+                        duplicates: String(run.duplicates),
+                        failed: String(run.failed),
+                      })}
+                    </p>
+                    {run.results.length > 0 ? (
+                      <ul className="mt-1.5 space-y-0.5 text-[0.6875rem] text-ink-400">
+                        {run.results.map((result) => (
+                          <li key={result.id} className="flex gap-2">
+                            <span className="num shrink-0 text-ink-500">{result.adapter}</span>
+                            <span
+                              className={
+                                result.status === "ERROR"
+                                  ? "shrink-0 text-hot"
+                                  : "shrink-0 text-ink-500"
+                              }
+                            >
+                              {t.settings.sourceStatuses[result.status]}
+                            </span>
+                            <span className="min-w-0 truncate" title={result.query}>
+                              {result.query}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {run.error ? (
+                      <p className="mt-1 break-all text-[0.6875rem] text-hot">{run.error}</p>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            )}
           </Section>
         </div>
       </div>

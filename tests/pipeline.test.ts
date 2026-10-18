@@ -32,16 +32,15 @@ afterAll(() => {
 });
 
 /** Probe rows are named by prefix so cleanup survives a mid-test timeout. */
-const PROBE_PREFIXES = ["t3-idem-", "t3-race-"];
+const PROBE_PREFIXES = ["t3-idem-", "t3-race-", "t3-screen-"];
 
 afterEach(async () => {
-  // lead_events cascade with the lead; shared Source rows are reused.
-  await prisma.lead.deleteMany({
-    where: { sourceExternalId: { startsWith: PROBE_PREFIXES[0] } },
-  });
-  await prisma.lead.deleteMany({
-    where: { sourceExternalId: { startsWith: PROBE_PREFIXES[1] } },
-  });
+  // lead_events / analyses cascade with the lead; shared Source rows are reused.
+  for (const prefix of PROBE_PREFIXES) {
+    await prisma.lead.deleteMany({
+      where: { sourceExternalId: { startsWith: prefix } },
+    });
+  }
 });
 
 describe("ingestion idempotency", () => {
@@ -109,5 +108,71 @@ describe("ingestion idempotency", () => {
       where: { leadId: winner.id, type: "DEDUPLICATED" },
     });
     expect(events).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("stage A screen", () => {
+  it("archives an obvious non-buyer without buying a FULL analysis", async () => {
+    const externalId = `t3-screen-${Date.now()}`;
+    const result = await ingestLead({
+      content: "How do I learn React? Which course should I take?",
+      sourceKind: SourceKind.REDDIT,
+      sourceName: "Screen test",
+      sourceExternalId: externalId,
+    });
+
+    expect(result.outcome).toBe("created");
+    if (result.outcome !== "created") return;
+    expect(result.analysisStatus).toBe("SKIPPED");
+
+    const lead = await prisma.lead.findUnique({ where: { id: result.leadId } });
+    expect(lead?.status).toBe("ARCHIVED");
+    expect(lead?.analysisStatus).toBe("SKIPPED");
+    // Only the SCREEN call was made: the expensive stage was skipped entirely.
+    const stages = await prisma.aIAnalysis.findMany({
+      where: { leadId: result.leadId },
+      select: { stage: true },
+    });
+    expect(stages.map((row) => row.stage)).toEqual(["SCREEN"]);
+  });
+
+  it("keeps a promising post and runs the full analysis after the screen", async () => {
+    const externalId = `t3-screen-${Date.now()}-keep`;
+    const result = await ingestLead({
+      content:
+        "Need a WooCommerce store for our construction company. Budget around 2000 EUR, want it live this month.",
+      sourceKind: SourceKind.REDDIT,
+      sourceName: "Screen test",
+      sourceExternalId: externalId,
+    });
+
+    expect(result.outcome).toBe("created");
+    if (result.outcome !== "created") return;
+    expect(result.analysisStatus).toBe("SUCCEEDED");
+
+    const stages = await prisma.aIAnalysis.findMany({
+      where: { leadId: result.leadId },
+      select: { stage: true },
+    });
+    expect(new Set(stages.map((row) => row.stage))).toEqual(new Set(["SCREEN", "FULL"]));
+  });
+
+  it("does not screen a manual entry: the owner pasted it on purpose", async () => {
+    const result = await ingestLead({
+      content: `Manual probe ${Date.now()} — just sharing a thought about websites.`,
+      sourceKind: SourceKind.MANUAL,
+      sourceName: "Manual probe",
+    });
+
+    expect(result.outcome).toBe("created");
+    if (result.outcome !== "created") return;
+
+    const stages = await prisma.aIAnalysis.findMany({
+      where: { leadId: result.leadId },
+      select: { stage: true },
+    });
+    expect(stages.map((row) => row.stage)).toEqual(["FULL"]);
+
+    await prisma.lead.delete({ where: { id: result.leadId } });
   });
 });

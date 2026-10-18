@@ -27,8 +27,13 @@ send. It never sends anything itself.
 | Owner profile + saved search queries | ✅ working |
 | Two UI languages (English / Русский) with a switcher | ✅ working — [docs/I18N.md](docs/I18N.md) |
 | API-key health monitor (live probe + history) in Settings | ✅ working |
-| Reddit source adapter + hunt runner (saved queries → pipeline) | ✅ working, needs `npm run hunt` (OAuth optional) |
-| Telegram / web source adapters, workers, Telegram alerts | ⏳ Phase 2+ |
+| Stage A screen before the expensive analysis (screened-out posts are archived with the reason, never dropped) | ✅ working |
+| Query provenance (`Lead.searchQueryId`) shown on the lead | ✅ working |
+| Reddit source adapter (OAuth2 client-credentials; public JSON fallback) | ✅ implemented — **live Reddit is blocked without credentials**: unauthenticated `search.json` now answers `403`, so set `REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET` |
+| Perplexity Search API source adapter | ✅ implemented — needs `PERPLEXITY_API_KEY` (paid: ~$5/1,000 searches) |
+| Hunt runner + run log (`scan_runs`, per-source `scan_source_results`) | ✅ working |
+| Scheduled discovery (cron / launchd, single-run lease, dry-run) | ✅ working — [docs/OPERATIONS.md](docs/OPERATIONS.md) |
+| Telegram source adapter, workers, Telegram alerts | ⏳ Phase 6 |
 
 **The loop the MVP is built around** (README §45 / docs/SPEC.md):
 
@@ -75,7 +80,8 @@ npm run dev            # http://localhost:3000
 | `npm run db:studio` | Prisma Studio |
 | `npm run set-password` | Generate `OWNER_PASSWORD_HASH` (`--write` patches `.env`) |
 | `npm run ai:check` | One real model call: verify a freshly pasted key (`--screen`, `--plain "…"`) |
-| `npm run hunt` | Scan every enabled saved query through the source adapters (`--dry-run`, `--limit N`, `--health`) |
+| `npm run hunt` | Scan every enabled saved query through the source adapters (`--dry-run`, `--limit N`, `--health`, `--scheduled`) |
+| `scripts/hunt-cron.sh` | The cron/launchd entry point: fixes PATH + cwd, logs, no overlap (see OPERATIONS.md) |
 
 ### Using Postgres in Docker instead of Homebrew
 
@@ -142,6 +148,51 @@ failed. Probes are two attempts max and never spend the analysis budget.
 
 ---
 
+## Discovery: sources, runs and scheduling
+
+A scan is one command — the same one cron runs:
+
+```bash
+npm run hunt -- --dry-run     # what would be found, writes nothing
+npm run hunt -- --limit 10    # fewer items per query
+npm run hunt -- --health      # can each adapter talk out?
+npm run hunt -- --scheduled   # used by cron; records the trigger as "cron"
+```
+
+What a run does: every **enabled saved query** goes to the adapter that serves
+its source; each item is fed through the *same* pipeline as a manually pasted
+post (dedupe → Stage A screen → full analysis → score), and the run is logged.
+
+**Sources**
+
+| Adapter | Credentials | Notes |
+| --- | --- | --- |
+| `reddit` | `REDDIT_CLIENT_ID` + `REDDIT_CLIENT_SECRET` (a free "script" app at reddit.com/prefs/apps) | Reddit now blocks unauthenticated programmatic search (HTTP 403, observed from this machine), so the OAuth flow is the supported path. The API returns at most ~100 results per query and 100 quota units/minute per client. |
+| `perplexity` | `PERPLEXITY_API_KEY` | Perplexity **Search API** (`POST /search`), paid per request, so the adapter only exists when the key is set. Results are ordinary web pages with a snippet: the adapter stores the URL + snippet and never claims buying intent itself — the screen and the analysis decide. |
+
+Both are read-only. Neither posts, votes, messages or follows anything, and
+neither ever writes to the database directly — they hand plain items to the
+pipeline.
+
+**Run log.** Every real run writes a `scan_runs` row plus one
+`scan_source_results` row per adapter search, so after the terminal is gone you
+can still tell *"this source was checked and found nothing"* (`EMPTY`) from
+*"this source failed"* (`ERROR`, with a code: `rateLimited`, `timeout`, `auth`,
+`http`, `network`, `parse`). Settings → **Discovery runs** shows the last three,
+and each Source row keeps its last outcome in `sources.health`.
+
+**Scheduling.** `scripts/hunt-cron.sh` is safe to call from cron or launchd: it
+fixes the PATH and working directory, appends a log, and relies on a database
+lease (`job_locks`) so two overlapping runs cannot scan twice — the second one
+just reports "already running" and exits 0. Setup, log reading and recovery:
+[docs/OPERATIONS.md](docs/OPERATIONS.md).
+
+Retries are bounded everywhere: HTTP retries with exponential backoff honour
+`Retry-After`, the AI layer retries only transient statuses, and
+`AI_DAILY_CALL_LIMIT` stops a runaway loop (the run is then marked `PARTIAL`).
+
+---
+
 ## Languages
 
 The console renders in **English or Russian**, chosen from the segmented control in
@@ -171,6 +222,12 @@ three-step recipe for adding a language: [docs/I18N.md](docs/I18N.md).
 
 - Nothing is ever sent, posted or replied to automatically. Drafts are stored as
   `Outreach` rows with status `DRAFT`; you mark them sent yourself.
+- A post is **untrusted data, never instructions**. All three system prompts say
+  so explicitly, and an attempt to manipulate the classifier is itself treated as
+  spam.
+- Every model call is schema-validated (the same schema is sent as the
+  structured-output format), and a post that fails the cheap screen is archived
+  with the screen's own reason rather than deleted.
 - One broken source or a failed AI call cannot lose a discovery: the lead is saved
   first, then analyzed, and a failure is recorded on the lead.
 - Non-leads are **archived**, never deleted, so you can overturn the call.
@@ -191,11 +248,12 @@ src/
   ai/                     provider interface, prompts, schemas, providers
   leads/                  pipeline, scoring, dedupe, queries, outreach
   auth/                   password hashing, session token, throttle
-  sources/                source adapters (Reddit) + the hunt runner
+  sources/                adapters (Reddit, Perplexity), hunt runner, job lock + run log
   i18n/                   locale config, en/ru dictionaries, server entry point, cookie action
   components/             shared UI: language switcher, submit/copy buttons, formatters
   lib/                    env, logger, text utils, params, prisma client
 prisma/                   schema + migration + seed
 tests/                    vitest suites (scoring, dedupe, heuristics, prompts, auth, i18n)
-docs/                     SPEC.md (requirements) + IMPLEMENTATION.md (how it was built) + I18N.md
+docs/                     SPEC.md (requirements) · IMPLEMENTATION.md (how it was built) ·
+                          AUDIT.md · ARCHITECTURE.md · OPERATIONS.md · SECURITY.md · I18N.md
 ```

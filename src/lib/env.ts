@@ -51,6 +51,22 @@ const EnvSchema = z.object({
   /** Point the adapter at a proxy, a mirror, or a local stub for testing. */
   REDDIT_BASE_URL: optionalText,
   REDDIT_OAUTH_URL: optionalText,
+  /** Per-call timeout for the Reddit adapter. */
+  REDDIT_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
+
+  /**
+   * Perplexity Search API (web results, billed per request). The adapter is
+   * only built when this key exists, so no accidental spend without opt-in.
+   */
+  PERPLEXITY_API_KEY: optionalText,
+  PERPLEXITY_BASE_URL: optionalText,
+  PERPLEXITY_MAX_RESULTS: z.coerce.number().int().positive().max(20).default(10),
+  /** hour | day | week | month | year — unset means no recency filter. */
+  PERPLEXITY_RECENCY: optionalText,
+  /** web (default) | fast (cheaper). */
+  PERPLEXITY_SEARCH_TYPE: optionalText,
+  PERPLEXITY_TIMEOUT_MS: z.coerce.number().int().positive().default(20_000),
+
   REDIS_URL: z.string().optional(),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
@@ -115,4 +131,13 @@ export function compatBaseUrl(): string | null {
 
 export function hasCompatKey(): boolean {
   return compatApiKey() !== null;
+}
+
+/** Key for the Perplexity Search API source. */
+export function perplexityApiKey(): string | null {
+  return nonEmpty(process.env.PERPLEXITY_API_KEY);
+}
+
+export function hasPerplexityKey(): boolean {
+  return perplexityApiKey() !== null;
 }

@@ -174,11 +174,66 @@ monitor exists to produce.
 8. Docs: `ARCHITECTURE.md`, `OPERATIONS.md` (cron, backups, troubleshooting), `SECURITY.md`; logger redaction; E2E happy path; retention policy.
 
 **Definition-of-done tracker**: install/build ✓ · migrations ✓ · auth ✓ ·
-real source live data ⬜ (blocked: no Reddit credentials; public-path probe
-next) · scheduled discovery ⬜ · idempotent duplicates ✓ · provenance ⬜ (source-level ✓,
-query-level ✗) · qualification with structured output + fallback ✓ · explainable
-scores ✓ · review/filter UI ✓ · editable drafts, manual send ✓ · replies/follow-ups
-partial (schema + UI ✓, no E2E) · failures visible ✓ (per-lead status + dashboard
-tile; job history n/a until Phase 4) · tests/typecheck/lint/build ✓ · security
-limitations documented ⬜ (`SECURITY.md`) · new-developer install path ✓ (README) ·
+real source live data ⬜ (still blocked: no Reddit credentials; public JSON path
+offers HTTP 403 from this network, OAuth implemented but unexercised live) ·
+scheduled discovery ✓ (Phase 2 follow-up: lease + run log + cron entry point) ·
+idempotent duplicates ✓ · provenance ✓ (source-level and query-level since the
+Phase 2 follow-up) · qualification with structured output + fallback ✓ ·
+explainable scores ✓ · review/filter UI ✓ · editable drafts, manual send ✓ ·
+replies/follow-ups partial (schema + UI ✓, no E2E) · failures visible ✓ (per-lead
+status, dashboard tile, per-source run status + `sources.health`) ·
+tests/typecheck/lint/build ✓ · security limitations documented ✓
+(`SECURITY.md`, Phase 2 follow-up) · new-developer install path ✓ (README) ·
 usable without fake data ✓ (manual intake + live key verified).
+
+---
+
+## 9. Phase 2 follow-up (2026-10-19)
+
+This section updates §5–§7 after the Phase 2 work; the tables above remain the
+snapshot that motivated it.
+
+### 9.1 Gaps closed
+
+| §5 # | Gap | Status after this phase |
+| --- | --- | --- |
+| 1 | No scheduler at all | **Closed (cron, not a queue).** `scripts/hunt-cron.sh` + `job_locks` lease + `scan_runs`/`scan_source_results`; manual run and dry-run via `npm run hunt`. Verified: overlap rejected, crashed-lease recovery via expiry, run log rows written. |
+| 2 | No query provenance | **Closed.** `leads.search_query_id` (nullable, `ON DELETE SET NULL`) threaded through the runner and rendered on the lead page. |
+| 3 | `screen()` dead code | **Closed.** Stage A runs before the FULL analysis; rejections archive with the screen's reason; a screen failure falls through to the full analysis; manual entries skip it. Pinned by DB-backed tests. |
+| 4 | No prompt-injection guard | **Closed** in all three system prompts (`PROMPT_VERSION` `2026-10-19.1`), plus a rule that a manipulation attempt is itself a spam signal. |
+| 10 | Docs missing | **Closed:** `ARCHITECTURE.md`, `OPERATIONS.md`, `SECURITY.md` added; README and IMPLEMENTATION updated. |
+| — | Second source | **Closed:** Perplexity Search API adapter, gated on `PERPLEXITY_API_KEY` (paid, so opt-in), documented cost and honest failure semantics. |
+
+### 9.2 Gaps still open
+
+| §5 # | Gap | Note |
+| --- | --- | --- |
+| 5 | `NO_RESPONSE` / `NOT_A_FIT` statuses | Unchanged; still approximated. Needs an additive enum migration. |
+| 6 | Per-profile query settings (frequency, exclusions, max age, language) | Unchanged. |
+| 7 | Funnel/conversion/per-query analytics, AI cost view, owner-recorded revenue | Unchanged — but the data needed for per-query analysis now exists. |
+| 8 | Browser E2E suite | Unchanged. The console was verified by execution (production build, authenticated requests), not by a checked-in Playwright suite. |
+| 9 | Retention policy | **Partly closed:** no automation, but `OPERATIONS.md §5` documents safe manual cleanup queries. |
+
+### 9.3 New defects found and fixed in this phase
+
+| Defect | Evidence |
+| --- | --- |
+| `BudgetExceededError` was swallowed by the per-lead catch in `pipeline.ts`, so a hunt never actually stopped at `AI_DAILY_CALL_LIMIT` — it kept issuing calls that could only fail, and `run.ts`'s budget branch was unreachable from the ingest path. | Code path traced; `BudgetExceededError` now rethrown from the pipeline and handled in the runner (which is what its tests already asserted). |
+| The job lease compared a naive `locked_until` timestamp against Postgres `NOW()`. The server clock/timezone offset made a live lease look expired: a planted lock did **not** block a scan (observed: run count 2 → 3). | Both sides of the comparison now use the application clock; re-tested: lock planted → scan skipped, run count unchanged. |
+| Failed Reddit search noise: every 403 body was truncated at 200 chars and stored verbatim in `sources.health` / run rows, which is what it is, but the run had no way to distinguish "blocked" from "misconfigured". | Failures now carry a code (`auth` here); the health detail appends the concrete fix (set `REDDIT_CLIENT_ID/SECRET`). |
+
+### 9.4 Live-source status (unchanged, and why)
+
+- **Reddit:** still no live data. `www.reddit.com/search.json` answers **HTTP 403**
+  from this network, and Reddit's current policy states unauthenticated
+  programmatic access is blocked. The OAuth2 client-credentials implementation is
+  complete and pinned by tests with an injected `fetch`; the only remaining step
+  is the owner's own app credentials.
+- **Perplexity:** endpoint reachable (**HTTP 401** with a deliberately invalid
+  key, classified `auth`); no real key is configured, so no live results were
+  retrieved. Nothing is claimed beyond that.
+
+**Remaining blocker for "real public data":** one source credential the owner
+must supply — either `REDDIT_CLIENT_ID` + `REDDIT_CLIENT_SECRET` (free) or
+`PERPLEXITY_API_KEY` (paid). Everything else in the pipeline is ready and
+verified offline.
